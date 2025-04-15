@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
         - build-kernel-a14-6-1
-    if: ${{ inputs.make_release }}
+    if: ${{ inputs.make_release == 'true' }}
     env:
       REPO_OWNER: Kavi
       REPO_NAME: GKI-Kernelsu-susfs
