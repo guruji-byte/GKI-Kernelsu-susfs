@@ -54,48 +54,58 @@ on:
         default: ""
 
 jobs:
-  build-kernel-a14-6-1:
-    uses: ./.github/workflows/kernel-a14-6.1.yml
-    secrets: inherit
-    with:
-      runner: ${{ inputs.runner }}
-      lto_type: ${{ inputs.lto_type }}
-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
-      kernelsu_branch: ${{ inputs.kernelsu_branch }}
-      kernelsu_branch_other: ${{ inputs.kernelsu_branch_other }}
-
-  trigger-release:
+trigger-release:
     runs-on: ubuntu-latest
-    needs:
-        - build-kernel-a14-6-1
-    if: ${{ inputs.make_release == 'true' }}
+    needs: build-kernel-a14-6-1
+    if: ${{ inputs.make_release && needs.build-kernel-a14-6-1.result == 'success' }}
     env:
       REPO_OWNER: Kavi
       REPO_NAME: GKI-Kernelsu-susfs
-      RELEASE_NAME: "*TEST BUILD* GKI Kernels With KernelSU ${{ inputs.kernelsu_variant }} & SUSFS v1.5.5 *TEST BUILD*"
+      RELEASE_NAME: "GKI Kernel with KernelSU ${{ inputs.kernelsu_variant }} & SUSFS v1.5.5"
       RELEASE_NOTES: |
-        This release contains KernelSU ${{ inputs.kernelsu_variant }} and SUSFS v1.5.5
+        This release contains:
+        - KernelSU ${{ inputs.kernelsu_variant }}
+        - SUSFS v1.5.5
+        - Wireguard Support
+        - Maphide Patches
+        - Magic Mount Support
         
-        Features:
-        [+] KernelSU-${{ inputs.kernelsu_variant }}
-        [+] SUSFS ඞ v1.5.5 
-        [+] Wireguard Support
-        [+] Simple Maphide for LineageOS Detections
-        [+] Futile Maphide for jit-zygote-cache Detections
-        [+] Magic Mount Support
-
-        Module: 
-        -> https://github.com/sidex15/ksu_module_susfs
+        Module: https://github.com/sidex15/ksu_module_susfs
         
     steps:
-      # Checkout the code
       - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Generate Release Tag
         run: |
-          DATE=$(date +'%Y%m%d')
-          echo "NEW_TAG=TEST-$DATE-${{ inputs.kernelsu_variant }}-${{ inputs.lto_type }}" >> $GITHUB_ENV
+          DATE=$(date +'%Y%m%d-%H%M')
+          echo "NEW_TAG=release-$DATE-${{ inputs.kernelsu_variant }}-${{ inputs.lto_type }}" >> $GITHUB_ENV
+          echo "Generated tag: $NEW_TAG"
+
+      - name: Verify build artifacts exist
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: List artifacts
+        run: ls -R artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.NEW_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          body: ${{ env.RELEASE_NOTES }}
+          prerelease: true
+          files: |
+            artifacts/**/*
+          fail_on_unmatched_files: true
+
+      - name: Show release info
+        run: |
+          gh release view ${{ env.NEW_TAG }} --json name,tagName,url,assets
 
       - name: Determine the branch for KernelSU-${{ inputs.kernelsu_variant }}
         run: |
