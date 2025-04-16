@@ -1,8 +1,8 @@
 name: Build and Release GKI Kernels
 
 permissions:
-  contents: write  # Allow writing to repository contents (for pushing tags)
-  actions: write   # Allows triggering actions
+  contents: write
+  actions: write
   
 on:
   workflow_dispatch:
@@ -54,7 +54,47 @@ on:
         default: ""
 
 jobs:
-trigger-release:
+  build-kernel-a14-6-1:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up build environment
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y git ccache bc build-essential libncurses-dev flex bison libssl-dev libelf-dev
+
+      - name: Configure build
+        run: |
+          # Your kernel configuration steps here
+          echo "Configuring kernel build with LTO=${{ inputs.lto_type }}"
+          # Example: make defconfig
+          # Modify config for LTO type
+
+      - name: Build kernel
+        run: |
+          # Your actual build command
+          echo "Building kernel with KernelSU=${{ inputs.kernelsu_variant }}"
+          # Example: make -j$(nproc)
+
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts
+          # Package your built kernel files
+          echo "Packaging kernel images and modules..."
+          # Example: cp arch/arm64/boot/Image.gz artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-${{ github.run_id }}
+          path: artifacts
+          retention-days: 1
+
+  trigger-release:
     runs-on: ubuntu-latest
     needs: build-kernel-a14-6-1
     if: ${{ inputs.make_release && needs.build-kernel-a14-6-1.result == 'success' }}
@@ -74,7 +114,7 @@ trigger-release:
         
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Generate Release Tag
         run: |
@@ -82,16 +122,132 @@ trigger-release:
           echo "NEW_TAG=release-$DATE-${{ inputs.kernelsu_variant }}-${{ inputs.lto_type }}" >> $GITHUB_ENV
           echo "Generated tag: $NEW_TAG"
 
-      - name: Verify build artifacts exist
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
+          name: kernel-build-${{ github.run_id }}
           path: artifacts
-          
-      - name: List artifacts
-        run: ls -R artifacts
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: Verify artifacts
+        run: |
+          echo "Artifacts directory contents:"
+          ls -R artifacts
+          if [ ! -d "artifacts" ] || [ -z "$(ls -A artifacts)" ]; then
+            echo "Error: No artifacts found!"
+            exit 1
+          fi
+
+      - name: Determine KernelSU branch
+        run: |
+          if [[ "${{ inputs.kernelsu_branch }}" == "Stable" ]]; then
+            BRANCH="Stable"
+          elif [[ "${{ inputs.kernelsu_branch }}" == "Dev" ]]; then
+            BRANCH="next"
+          elif [[ "${{ inputs.kernelsu_branch }}" == "Other" && -n "${{ inputs.kernelsu_branch_other }}" ]]; then
+            BRANCH="${{ inputs.kernelsu_branch_other }}"
+          else
+            echo "Error: Invalid branch selection" >&2
+            exit 1
+          fi
+          echo "KSU_BRANCH=$BRANCH" >> $GITHUB_ENV
+
+      - name: Get KernelSU reference
+        run: |
+          if [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
+            REPO_URL="https://github.com/tiann/KernelSU.git"
+            REPO_URL2="tiann/KernelSU"
+          elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
+            REPO_URL="https://github.com/rifsxd/KernelSU-Next.git"
+            REPO_URL2="rifsxd/KernelSU-Next"
+          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
+            REPO_URL="https://github.com/5ec1cff/KernelSU.git"
+            REPO_URL2="5ec1cff/KernelSU"
+          else
+            echo "Unknown KernelSU variant"
+            exit 1
+          fi
+          
+          BRANCH="${{ env.KSU_BRANCH }}"
+          
+          if [[ "$BRANCH" == "Stable" ]]; then
+            TAG=$(git ls-remote --tags --sort=-v:refname $REPO_URL | grep -o 'refs/tags/.*' | cut -d'/' -f3 | head -n1)
+            if [[ -z "$TAG" ]]; then
+              echo "Error: Could not fetch latest tag" >&2
+              exit 1
+            fi
+            KSU_REF=$TAG
+            KSU_URL="https://github.com/$REPO_URL2/releases/tag/$TAG"
+          elif [[ "$BRANCH" == "Dev" || "$BRANCH" == "next" ]]; then
+            COMMIT_HASH=$(git ls-remote $REPO_URL refs/heads/$BRANCH | awk '{ print $1 }')
+            if [[ -z "$COMMIT_HASH" ]]; then
+              echo "Error: Could not fetch latest commit" >&2
+              exit 1
+            fi
+            KSU_REF=$COMMIT_HASH
+            KSU_URL="https://github.com/$REPO_URL2/commit/$COMMIT_HASH"
+          else
+            if git ls-remote --tags $REPO_URL | grep -q "refs/tags/$BRANCH"; then
+              KSU_REF=$BRANCH
+              KSU_URL="https://github.com/$REPO_URL2/releases/tag/$BRANCH"
+            else
+              echo "Error: Specified tag '$BRANCH' not found" >&2
+              exit 1
+            fi
+          fi
+
+          echo "KSU_REF=$KSU_REF" >> $GITHUB_ENV
+          echo "KSU_URL=$KSU_URL" >> $GITHUB_ENV
+
+      - name: Get SUSFS commit info
+        run: |
+          GITLAB_OWNER="simonpunk"
+          GITLAB_REPO="susfs4ksu"
+          BRANCH="gki-android14-6.1"
+          
+          COMMIT_HASH=$(git ls-remote https://gitlab.com/$GITLAB_OWNER/$GITLAB_REPO.git refs/heads/$BRANCH | awk '{ print $1 }')
+          if [[ -n "$COMMIT_HASH" ]]; then
+            COMMIT_URL="https://gitlab.com/$GITLAB_OWNER/$GITLAB_REPO/-/commit/$COMMIT_HASH"
+            echo "COMMIT_HASH_SUSFS=$COMMIT_HASH" >> $GITHUB_ENV
+            echo "COMMIT_URL_SUSFS=$COMMIT_URL" >> $GITHUB_ENV
+          else
+            echo "Error: Could not fetch SUSFS commit" >&2
+            exit 1
+          fi
+
+      - name: Prepare release notes
+        run: |
+          NOTES="This release contains:
+          - KernelSU ${{ inputs.kernelsu_variant }}
+          - SUSFS v1.5.5
+          - Wireguard Support
+          - Maphide Patches
+          - Magic Mount Support
+          
+          Module: https://github.com/sidex15/ksu_module_susfs
+          
+          Build Details:
+          - LTO: ${{ inputs.lto_type }}
+          - Runner: ${{ inputs.runner }}
+          
+          Component Versions:
+          - KernelSU ${{ inputs.kernelsu_variant }} (${{ inputs.kernelsu_branch }}): [${{ env.KSU_REF }}](${{ env.KSU_URL }})
+          - SUSFS: [${{ env.COMMIT_HASH_SUSFS }}](${{ env.COMMIT_URL_SUSFS }})
+          "
+
+          if [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
+            NOTES+="\nManager: https://github.com/tiann/KernelSU"
+          elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
+            NOTES+="\nManager: https://github.com/rifsxd/KernelSU-Next"
+          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
+            NOTES+="\nManager: https://github.com/5ec1cff/KernelSU"
+          fi
+
+          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
+          echo "$NOTES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -103,190 +259,6 @@ trigger-release:
             artifacts/**/*
           fail_on_unmatched_files: true
 
-      - name: Show release info
+      - name: Verify release
         run: |
           gh release view ${{ env.NEW_TAG }} --json name,tagName,url,assets
-
-      - name: Determine the branch for KernelSU-${{ inputs.kernelsu_variant }}
-        run: |
-          # Determine the branch based on user input
-          if [[ "${{ inputs.kernelsu_branch }}" == "Stable" ]]; then
-            BRANCH="Stable"
-          elif [[ "${{ inputs.kernelsu_branch }}" == "Dev" ]]; then
-            BRANCH="next"
-          elif [[ "${{ inputs.kernelsu_branch }}" == "Other" && -n "${{ inputs.kernelsu_branch_other }}" ]]; then
-            BRANCH="${{ inputs.kernelsu_branch_other }}"
-          else
-            echo "Error: Custom branch not provided for 'Other'" >&2
-            exit 1
-          fi
-
-          # Store the selected branch in GITHUB_ENV
-          echo "KSU_BRANCH=$BRANCH" >> $GITHUB_ENV
-
-      - name: Get commit hash or tag and generate URL for KernelSU-${{ inputs.kernelsu_variant }}
-        run: |
-          if [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
-            echo "This is the Official variant"
-            REPO_URL="https://github.com/tiann/KernelSU.git"
-            REPO_URL2="tiann/KernelSU"
-          elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
-            echo "This is the Next variant"
-            REPO_URL="https://github.com/rifsxd/KernelSU-Next.git"
-            REPO_URL2="rifsxd/KernelSU-Next"
-          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
-            echo "This is the MKSU variant"
-            REPO_URL="https://github.com/5ec1cff/KernelSU.git"
-            REPO_URL2="5ec1cff/KernelSU"
-          else
-            echo "Unknown variant"
-          fi
-          
-          BRANCH="${{ env.KSU_BRANCH }}"
-          
-          if [[ "$BRANCH" == "Stable" ]]; then
-            # Fetch the latest tag
-            TAG=$(git ls-remote --tags --sort=-v:refname $REPO_URL | grep -o 'refs/tags/.*' | cut -d'/' -f3 | head -n1)
-            if [[ -z "$TAG" ]]; then
-              echo "Error: Could not fetch latest tag for KernelSU" >&2
-              exit 1
-            fi
-            KSU_REF=$TAG
-            KSU_URL="https://github.com/$REPO_URL2/releases/tag/$TAG"
-
-          elif [[ "$BRANCH" == "Dev" ]]; then
-            # Fetch the latest commit from "next" branch
-            COMMIT_HASH=$(git ls-remote $REPO_URL refs/heads/$BRANCH | awk '{ print $1 }')
-            if [[ -z "$COMMIT_HASH" ]]; then
-              echo "Error: Could not fetch latest commit for KernelSU-Next Dev" >&2
-              exit 1
-            fi
-            KSU_REF=$COMMIT_HASH
-            KSU_URL="https://github.com/$REPO_URL2/commit/$COMMIT_HASH"
-
-          else
-            # Fetch the specific tag for the custom branch
-            TAG=$BRANCH
-            if git ls-remote --tags $REPO_URL | grep -q "refs/tags/$TAG"; then
-              KSU_REF=$TAG
-              KSU_URL="https://github.com/$REPO_URL2/releases/tag/$TAG"
-            else
-              echo "Error: Specified tag '$TAG' not found in KernelSU-Next" >&2
-              exit 1
-            fi
-          fi
-
-          # Echo the values to GitHub environment for later use
-          echo "KSU_REF=$KSU_REF" >> $GITHUB_ENV
-          echo "KSU_URL=$KSU_URL" >> $GITHUB_ENV
-          echo "KernelSU Reference: $KSU_REF"
-          echo "KernelSU URL: $KSU_URL"
-
-      - name: Get commit hashes and generate commit URLs
-        run: |
-          GITLAB_OWNER="simonpunk"
-          GITLAB_REPO="susfs4ksu"
-
-          declare -A BRANCH_MAP=(
-            ["gki_android14_6_1"]="gki-android14-6.1"
-          )
-
-          for var_name in "${!BRANCH_MAP[@]}"; do
-            branch_name="${BRANCH_MAP[$var_name]}"
-            COMMIT_HASH=$(git ls-remote https://gitlab.com/$GITLAB_OWNER/$GITLAB_REPO.git refs/heads/$branch_name | awk '{ print $1 }')
-
-            if [[ -n "$COMMIT_HASH" ]]; then
-              COMMIT_URL="https://gitlab.com/$GITLAB_OWNER/$GITLAB_REPO/-/commit/$COMMIT_HASH"
-              echo "$branch_name Commit: $COMMIT_HASH"
-              echo "$branch_name Commit URL: $COMMIT_URL"
-
-              # Store commit hash and commit URL in GitHub environment
-              echo "COMMIT_HASH_${var_name}=$COMMIT_HASH" >> "$GITHUB_ENV"
-              echo "COMMIT_URL_${var_name}=$COMMIT_URL" >> "$GITHUB_ENV"
-            fi
-          done
-
-      - name: Append Commit Hashes & Links to `RELEASE_NOTES` & Append KernelSU-Next Reference to `RELEASE_NOTES`
-        run: |
-          if [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
-            echo "This is the Official variant"
-            echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
-            echo "$RELEASE_NOTES" >> $GITHUB_ENV
-            echo "Official Manager:" >> $GITHUB_ENV
-            echo "-> https://github.com/tiann/KernelSU" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-          elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
-            echo "This is the Next variant"
-            echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
-            echo "$RELEASE_NOTES" >> $GITHUB_ENV
-            echo "Next Manager:" >> $GITHUB_ENV
-            echo "-> https://github.com/rifsxd/KernelSU-Next" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
-            echo "This is the MKSU variant"
-            echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
-            echo "$RELEASE_NOTES" >> $GITHUB_ENV
-            echo "MKSU Manager:" >> $GITHUB_ENV
-            echo "-> https://github.com/5ec1cff/KernelSU" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-          else
-            echo "Unknown variant"
-          fi
-          
-      - name: Append Commit Hashes & Links to `RELEASE_NOTES` & Append KernelSU-Next Reference to `RELEASE_NOTES`
-        run: |
-          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
-          echo "$RELEASE_NOTES" >> $GITHUB_ENV
-          echo "" >> $GITHUB_ENV
-          echo "LTO: ${{ inputs.lto_type }}" >> $GITHUB_ENV
-          echo "" >> $GITHUB_ENV
-          echo "Commit Hashes & Links:" >> $GITHUB_ENV
-          echo "KernelSU:" >> $GITHUB_ENV
-          echo "${{ inputs.kernelsu_variant }}-${{ inputs.kernelsu_branch }}: [$KSU_REF]($KSU_URL)" >> $GITHUB_ENV
-          echo "SUSFS4KSU:" >> $GITHUB_ENV
-          echo "gki-android14-6.1: [$COMMIT_HASH_gki_android14_6_1]($COMMIT_URL_gki_android14_6_1)" >> $GITHUB_ENV
-          echo "" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-       
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./downloaded-artifacts
-
-      - name: List Downloaded Artifacts
-        run: ls -R ./downloaded-artifacts
-
-      # Create GitHub Release and upload files
-      - name: Create GitHub Release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.NEW_TAG }}
-          prerelease: true
-          release_name: ${{ env.RELEASE_NAME }}
-          body: ${{ env.RELEASE_NOTES }}
-
-      - name: Upload Release Assets Dynamically
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Install GitHub CLI if not present
-          if ! command -v gh &> /dev/null; then
-            sudo apt-get install -y gh
-          fi
-          
-          # Loop through all files in the downloaded-artifacts directory
-          for file in ./downloaded-artifacts/*/*; do
-              if [ -f "$file" ]; then
-                  echo "Uploading $file..."
-                  gh release upload ${{ env.NEW_TAG }} "$file" || echo "Failed to upload $file"
-              fi
-          done
-
-      # Display Files Uploaded
-      - name: Display Files Uploaded
-        run: |
-          echo "GitHub release created with tag: ${{ env.NEW_TAG }}"
-          echo "Files uploaded:"
-          gh release view ${{ env.NEW_TAG }} --json assets --jq '.assets[].name'
